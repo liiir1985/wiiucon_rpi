@@ -11,17 +11,19 @@
 #include <linux/ioport.h>
 #include <linux/version.h>
 #include <asm/io.h>
-#include "wiringPi.h"
+#include <linux/i2c.h>
+#include <linux/gpio.h>
 
 MODULE_AUTHOR("liiir1985");
 MODULE_DESCRIPTION("WiiU gamepad driver");
-MODULE_LICENSE("MIT");
+MODULE_LICENSE("GPL");
+MODULE_VERSION("1.0.0");
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 #define HAVE_TIMER_SETUP
 #endif
 
-#define GC_REFRESH_TIME	HZ/100
+#define GC_REFRESH_TIME	HZ / 100
 
 struct gc_pad {
 	struct input_dev *dev;
@@ -46,6 +48,24 @@ static const short gc_btn[] = {
 	BTN_SELECT, BTN_THUMBL, BTN_THUMBR, BTN_START, BTN_0, BTN_1, BTN_2
 };
 
+#define GC_BTN_TL2 0
+#define GC_BTN_TR2 1
+#define GC_BTN_TL 2
+#define GC_BTN_TR 3
+#define GC_BTN_X 4
+#define GC_BTN_A 5
+#define GC_BTN_B 6
+#define GC_BTN_Y 7
+#define GC_BTN_SELECT 8
+#define GC_BTN_THUMBL 9
+#define GC_BTN_THUMBR 10
+#define GC_BTN_START 11
+#define GC_BTN_HOME 12
+#define GC_BTN_POWER 13
+#define GC_BTN_TV 14
+
+static int gc_btn_states[15];
+
 static const short gc_abs[] = {
 	ABS_RX, ABS_RY, ABS_X, ABS_Y
 };
@@ -58,7 +78,11 @@ static void gc_timer(unsigned long private)
 {
 	struct gc *gc = (void *) private;
 #endif
+	struct input_dev* dev = gc->pad.dev;
+    gc_btn_states[GC_BTN_THUMBR] = gpio_get_value(25);
+	input_report_key(dev, BTN_THUMBR, gc_btn_states[GC_BTN_THUMBR] == 0);
 
+    input_sync(dev);
     mod_timer(&gc->timer, jiffies + GC_REFRESH_TIME);
 }
 
@@ -114,14 +138,17 @@ static int __init gc_setup_pad(struct gc *gc)
 
 	input_dev->open = gc_open;
 	input_dev->close = gc_close;
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
 
     for (i = 0; i < 4; i++)
         input_set_abs_params(input_dev,
                         gc_abs[i], -1, 1, 0, 0);
 
     for (i = 0; i < 15; i++)
-        __set_bit(gc_btn[i], input_dev->keybit);
-
+	{
+		//input_dev->keybit[BIT_WORD(gc_btn[i])] = BIT_MASK(gc_btn[i]);
+		__set_bit(gc_btn[i], input_dev->keybit);
+	}
 	
     err = input_register_device(pad->dev);
 	if (err)
@@ -154,6 +181,28 @@ static struct gc __init *gc_probe(void)
 	#else
 	setup_timer(&gc->timer, gc_timer, (long) gc);
 	#endif
+	err = gpio_request(25,"THUMBR");
+	if(err)
+	{
+		if (gc->pad.dev)
+        {
+            input_unregister_device(gc->pad.dev);
+        }
+        kfree(gc);
+        return ERR_PTR(err);
+	}
+	err = gpio_direction_input(25);
+ 	if(err)
+	{
+		if (gc->pad.dev)
+        {
+            input_unregister_device(gc->pad.dev);
+        }
+        kfree(gc);
+        return ERR_PTR(err);
+	}
+	//pinMode(6, INPUT);
+	//pullUpDnControl(6, PUD_UP);
 
     err = gc_setup_pad(gc);
     if (err)
@@ -178,11 +227,13 @@ static void gc_remove(struct gc *gc)
     {
         input_unregister_device(gc->pad.dev);
     }
+	gpio_free(25);
 	kfree(gc);
 }
 
 static int __init gc_init(void)
 {
+	//wiringPiSetup();
     gc_base = gc_probe();
     if (IS_ERR(gc_base))
     {
