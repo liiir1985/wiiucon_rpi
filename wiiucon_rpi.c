@@ -175,7 +175,7 @@ static const int gc_gpio[] = {
 #define GC_BTN_HOME 12
 #define GC_BTN_TV 13
 
-static int gc_btn_states[14];
+static int gc_btn_states[18];
 
 static uint16_t gc_abs_vals[4];
 
@@ -353,7 +353,10 @@ static void gc_timer(unsigned long private)
 	//input_abs_set_res(dev, gc_abs[0], axisVal);
 
 	//axisVal = readADC_SingleEnded(3);
-	//input_abs_set_res(dev, gc_abs[1], axisVal);
+	input_report_abs(dev, gc_abs[0], gc_abs_vals[0]);
+    input_report_abs(dev, gc_abs[1], gc_abs_vals[1]);
+    input_report_abs(dev, gc_abs[2], gc_abs_vals[2]);
+    input_report_abs(dev, gc_abs[3], gc_abs_vals[3]);
 
     input_sync(dev);
     mod_timer(&gc->timer, jiffies + GC_REFRESH_TIME);
