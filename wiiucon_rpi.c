@@ -13,6 +13,8 @@
 #include <asm/io.h>
 #include <linux/i2c.h>
 #include <linux/gpio.h>
+#include <linux/fs.h>
+#include <linux/proc_fs.h>
 
 MODULE_AUTHOR("liiir1985");
 MODULE_DESCRIPTION("WiiU gamepad driver");
@@ -124,6 +126,7 @@ static struct i2c_board_info oled_i2c_board_info = {
 
 static struct i2c_adapter *etx_i2c_adapter     = NULL;  // I2C Adapter Structure
 static struct i2c_client  *etx_i2c_client_ads1115 = NULL;  // I2C Cient Structure (In our case it is ADC)
+static struct proc_dir_entry *parent = NULL;
 
 struct gc_pad {
 	struct input_dev *dev;
@@ -145,7 +148,16 @@ static struct gc *gc_base;
 
 static const short gc_btn[] = {
 	BTN_TL2, BTN_TR2, BTN_TL, BTN_TR, BTN_X, BTN_A, BTN_B, BTN_Y,
-	BTN_SELECT, BTN_THUMBL, BTN_THUMBR, BTN_START, BTN_0, BTN_1, BTN_2
+	BTN_SELECT, BTN_THUMBL, BTN_THUMBR, BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT, BTN_START, BTN_0, BTN_1
+};
+
+static const char* gc_btn_name[]={
+    "BTN_TL2", "BTN_TR2", "BTN_TL", "BTN_TR", "BTN_X", "BTN_A", "BTN_B", "BTN_Y",
+	"BTN_SELECT", "BTN_THUMBL", "BTN_THUMBR", "BTN_UP", "BTN_DOWN", "BTN_LEFT", "BTN_RIGHT", "BTN_START", "BTN_HOME", "BTN_TV"
+};
+
+static const int gc_gpio[] = {
+    22, 5, 4, 16, 6, 26, 7, 12, 13, 25,27, 24,23,17, 11, 8, 9, 10
 };
 
 #define GC_BTN_TL2 0
@@ -161,17 +173,74 @@ static const short gc_btn[] = {
 #define GC_BTN_THUMBR 10
 #define GC_BTN_START 11
 #define GC_BTN_HOME 12
-#define GC_BTN_POWER 13
-#define GC_BTN_TV 14
+#define GC_BTN_TV 13
 
-static int gc_btn_states[15];
+static int gc_btn_states[14];
+
+static uint16_t gc_abs_vals[4];
 
 static const short gc_abs[] = {
 	ABS_RX, ABS_RY, ABS_X, ABS_Y
 };
 
+/***************** Procfs Functions *******************/
+static int      open_proc(struct inode *inode, struct file *file);
+static int      release_proc(struct inode *inode, struct file *file);
+static ssize_t  read_proc(struct file *filp, char __user *buffer, size_t length,loff_t * offset);
+static ssize_t  write_proc(struct file *filp, const char *buff, size_t len, loff_t * off);
 
+/*
+** procfs operation sturcture
+*/
+static struct proc_ops proc_fops = {
+        .proc_open = open_proc,
+        .proc_read = read_proc,
+        .proc_write = write_proc,
+        .proc_release = release_proc
+};
 
+/*
+** This function will be called when we open the procfs file
+*/
+static int open_proc(struct inode *inode, struct file *file)
+{
+    pr_info("proc file opend.....\t");
+    return 0;
+}
+/*
+** This function will be called when we close the procfs file
+*/
+static int release_proc(struct inode *inode, struct file *file)
+{
+    pr_info("proc file released.....\n");
+    return 0;
+}
+/*
+** This function will be called when we read the procfs file
+*/
+static ssize_t read_proc(struct file *filp, char __user *buffer, size_t length,loff_t * offset)
+{
+    if(length > 8)
+        length = 8;
+    if( copy_to_user(buffer,(char*)gc_abs_vals,length) )
+    {
+        pr_err("Data Send : Err!\n");
+    }
+ 
+    return length;
+}
+/*
+** This function will be called when we write the procfs file
+*/
+static ssize_t write_proc(struct file *filp, const char *buff, size_t len, loff_t * off)
+{
+    if( copy_from_user((char*)gc_abs_vals,buff,len) )
+    {
+        pr_err("Data Write : Err!\n");
+    }
+    
+    return len;
+}
 
 /**************************************************************************/
 /*!
@@ -186,7 +255,7 @@ static void writeRegister(uint8_t reg, uint16_t value) {
 	buf[2] =(uint8_t)(value & 0xFF);
 	ret = i2c_master_send(etx_i2c_client_ads1115, buf, 3);
 	if(ret<0)
-		pr_err("Sending message Error to ADS1115");
+		pr_err("Sending message Error to ADS1115,errno=%d", ret);
 }
 
 /**************************************************************************/
@@ -201,10 +270,10 @@ static uint16_t readRegister(uint8_t reg)
 	buf[0] = ADS1015_REG_POINTER_CONVERT;
 	ret = i2c_master_send(etx_i2c_client_ads1115, buf, 1);
 	if(ret<0)
-		pr_err("Receiving message Error to ADS1115");
+		pr_err("Receiving message Error to ADS1115, errno=%d", ret);
 	ret = i2c_master_recv(etx_i2c_client_ads1115, buf, 2);
 	if(ret<0)
-		pr_err("Receiving message Error to ADS1115");
+		pr_err("Receiving message Error to ADS1115, errno=%d", ret);
 	return *(uint16_t*)buf;
 }
 
@@ -228,7 +297,7 @@ uint16_t readADC_SingleEnded(uint8_t channel) {
                     ADS1015_REG_CONFIG_MODE_SINGLE;   // Single-shot mode (default)
 
   // Set PGA/voltage range
-  config |= GAIN_ONE;
+  config |= GAIN_TWOTHIRDS;
 
   // Set single-ended input channel
   switch (channel)
@@ -254,7 +323,7 @@ uint16_t readADC_SingleEnded(uint8_t channel) {
   writeRegister(ADS1015_REG_POINTER_CONFIG, config);
 
   // Wait for the conversion to complete
-  //delay(ADS1115_CONVERSIONDELAY);
+  mdelay(ADS1115_CONVERSIONDELAY);
 
   // Read the conversion results
   // Shift 12-bit results right 4 bits for the ADS1015
@@ -272,12 +341,19 @@ static void gc_timer(unsigned long private)
 #endif
 	struct input_dev* dev = gc->pad.dev;
 	int axisVal;
-	
-    gc_btn_states[GC_BTN_THUMBR] = gpio_get_value(25);
-	input_report_key(dev, BTN_THUMBR, gc_btn_states[GC_BTN_THUMBR] == 0);
+    int i = 1;
 
-	axisVal = readADC_SingleEnded(0);
-	input_abs_set_res(dev, gc_abs[0], axisVal);
+    for(i = 0; i < 18; i++)
+    {
+        gc_btn_states[i] = gpio_get_value(gc_gpio[i]);
+    	input_report_key(dev, gc_btn[i], gc_btn_states[i] == 0);
+    }
+    
+	//axisVal = readADC_SingleEnded(2);
+	//input_abs_set_res(dev, gc_abs[0], axisVal);
+
+	//axisVal = readADC_SingleEnded(3);
+	//input_abs_set_res(dev, gc_abs[1], axisVal);
 
     input_sync(dev);
     mod_timer(&gc->timer, jiffies + GC_REFRESH_TIME);
@@ -341,7 +417,7 @@ static int __init gc_setup_pad(struct gc *gc)
         input_set_abs_params(input_dev,
                         gc_abs[i], 0, 0xFFFF, 0, 0);
 
-    for (i = 0; i < 15; i++)
+    for (i = 0; i < 18; i++)
 	{
 		//input_dev->keybit[BIT_WORD(gc_btn[i])] = BIT_MASK(gc_btn[i]);
 		__set_bit(gc_btn[i], input_dev->keybit);
@@ -364,6 +440,7 @@ static struct gc __init *gc_probe(void)
 {
 	struct gc *gc;
 	int err;
+    int i;
 
 	gc = kzalloc(sizeof(struct gc), GFP_KERNEL);
 	if (!gc) {
@@ -378,27 +455,32 @@ static struct gc __init *gc_probe(void)
 	#else
 	setup_timer(&gc->timer, gc_timer, (long) gc);
 	#endif
-	err = gpio_request(25,"THUMBR");
-	if(err)
-	{
-		if (gc->pad.dev)
+
+    for (i = 0; i < 18; i++)
+	{        
+        err = gpio_request(gc_gpio[i], gc_btn_name[i]);
+        if(err)
         {
-            input_unregister_device(gc->pad.dev);
+            if (gc->pad.dev)
+            {
+                input_unregister_device(gc->pad.dev);
+            }
+            kfree(gc);
+            return ERR_PTR(err);
         }
-        kfree(gc);
-        return ERR_PTR(err);
-	}
+        
+        err = gpio_direction_input(gc_gpio[i]);
+        if(err)
+        {
+            if (gc->pad.dev)
+            {
+                input_unregister_device(gc->pad.dev);
+            }
+            kfree(gc);
+            return ERR_PTR(err);
+        }
+    }
 	
-	err = gpio_direction_input(25);
- 	if(err)
-	{
-		if (gc->pad.dev)
-        {
-            input_unregister_device(gc->pad.dev);
-        }
-        kfree(gc);
-        return ERR_PTR(err);
-	}
 	//pinMode(6, INPUT);
 	//pullUpDnControl(6, PUD_UP);
 
@@ -421,11 +503,13 @@ static struct gc __init *gc_probe(void)
 
 static void gc_remove(struct gc *gc)
 {
+    int i;
     if (gc->pad.dev)
     {
         input_unregister_device(gc->pad.dev);
     }
-	gpio_free(25);
+    for(i = 0; i < 18; i++)
+	    gpio_free(gc_gpio[i]);
 	kfree(gc);
 }
 
@@ -470,27 +554,48 @@ static struct i2c_driver etx_oled_driver = {
 static int __init gc_init(void)
 {
 	//wiringPiSetup();
+    pr_info("Wiiu Gamepad initializing");
     gc_base = gc_probe();
     if (IS_ERR(gc_base))
     {
         return -ENODEV;
     }
-	
-	etx_i2c_adapter     = i2c_get_adapter(1);
+
+    /*Create proc directory. It will create a directory under "/proc" */
+    parent = proc_mkdir("wiicon",NULL);
+    
+    if( parent == NULL )
+    {
+        pr_info("Error creating proc entry");
+        goto r_device;
+    }
+    
+    /*Creating Proc entry under "/proc/etx/" */
+    proc_create("js", 0666, parent, &proc_fops);
+	r_device:
+	/*pr_info("Wiiu Gamepad initializing i2c");
+    etx_i2c_adapter     = i2c_get_adapter(1);
     
     if( etx_i2c_adapter != NULL )
     {
+        pr_info("Wiiu Gamepad creating i2c client");
+    
         etx_i2c_client_ads1115 = i2c_new_client_device(etx_i2c_adapter, &oled_i2c_board_info);
         
         if( etx_i2c_client_ads1115 != NULL )
         {
+            pr_info("Wiiu Gamepad add drive");
+    
             i2c_add_driver(&etx_oled_driver);
         }
-        
+        pr_info("Wiiu Gamepad put adapter");
+    
         i2c_put_adapter(etx_i2c_adapter);
     }
-    
+    int axisVal = readADC_SingleEnded(3);
+    pr_info("sample value:%d", axisVal);
     pr_info("ADS1115 Added!!!\n");
+    */
 	return 0;
 }
 
@@ -498,10 +603,10 @@ static void __exit gc_exit(void)
 {
 	if (gc_base)
 		gc_remove(gc_base);
-
-	i2c_unregister_device(etx_i2c_client_ads1115);
+    proc_remove(parent);
+	/*i2c_unregister_device(etx_i2c_client_ads1115);
     i2c_del_driver(&etx_oled_driver);
-    pr_info("ADS1115 Removed!!!\n");
+    pr_info("ADS1115 Removed!!!\n");*/
 }
 
 module_init(gc_init);
